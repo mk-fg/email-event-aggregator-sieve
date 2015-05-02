@@ -1,0 +1,38 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+
+import itertools as it, operator as op, functools as ft
+import os, sys
+
+conf_default_paths = '~/{}.yaml'.format(
+	os.path.basename(__file__).split('.', 1)[0] ), '~/.eeas.yaml'
+
+
+def main(args=None):
+	import argparse
+	parser = argparse.ArgumentParser(
+		description='Email filtering hook to aggregate'
+			' and keep track of repeated event notification emails.')
+
+	parser.add_argument('tag', nargs='*',
+		help='Tag of a mail processing group to use.'
+			' With no tags specified, all groups will be matched.')
+
+	parser.add_argument('-c', '--conf', metavar='path',
+		help='Path to configuration file.'
+			' Default is to use first existing one of these: {}'.format(', '.join(conf_default_paths)))
+	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
+	opts = parser.parse_args(sys.argv[1:] if args is None else args)
+
+	global log
+	import logging
+	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
+	log = logging.getLogger()
+
+
+
+
+
+
+if __name__ == '__main__': sys.exit(main())

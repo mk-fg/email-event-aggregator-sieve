@@ -1,0 +1,64 @@
+
+aggregation:
+  # Parameters for the token-bucket algorithm
+  # Can be overidden on a per-group basis below
+
+  # Each matched mail "grabs" a token, or a fraction
+  #  of one, regardless of how it gets classified in the end
+  # burst=5 means "max 5 tokens in a bucket"
+  burst: 3
+
+  # When number of tokens drops below "min", stuff gets rate-limited
+  # Note that number of tokens can be fractional, so that if mails hit bucket
+  #  with interval=1d more than 1/d, there will always be 0 <= n < 1 tokens,
+  #  so with min=1, nothing will pass, until rate drops below 1/d
+  min: 1
+
+  # Interval between new tokens
+  # Examples: "30s", "10min", "1h 20m", "1mo 10h"
+  # All units: y (yr, year), mo (month), w (week),
+  #  d (day), h (hr, hour), m (min, minute), s (sec, second)
+  interval: 3d
+
+
+groups:
+
+  cron_jobs_without_timestamps: # arbitrary group name
+
+    # This group would be applied to message if
+    #  any of the group tags will be specified on the command line
+    tags:
+      - cron-jobs
+
+    name:
+      # Name for this event in the digest (if used)
+      # This further subdivides group into particular events, e.g. here each
+      #   cron job will only be aggregated with same-source and same-name jobs
+
+      fingerprint-groups: [source, name] # groups from any fingerprint match
+      # static: # one static name for all events in this group
+
+      # regexp: # same structure as for "fingerprint", all groups will be used
+      #   headers:
+      #     header-name:
+      #   body:
+      #   stdin:
+
+    fingerprint:
+      # All matched regexp (python "re") groups will produce a fingerprint
+      # Use e.g. '(?:stuff)' to use braces in regexp without creating a group
+
+      headers: # regexps to match against specific headers (if present)
+        subject: # header names are case-insensitive
+          # XXX: need better logic here - some embedded scheme maybe?
+          - '^Cron\s+<(?P<source>[^>]+)>\s+(?P<name>.*)$'
+
+      body: # list of regexps to match against message body
+        # XXX: need better logic here - some embedded scheme maybe?
+        - '^Cron\s+<[^>]+>\s+(.*)$'
+
+      # stdin: # list of regexps to match against whole stdin (headers + body)
+
+    # aggregation: # same keys as in global section
+
+  # my-whatever-other-event-group: ...
