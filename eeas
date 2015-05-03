@@ -30,9 +30,8 @@ def main(args=None):
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
 	log = logging.getLogger()
 
-
-
-
-
+	ns = dict()
+	code = compile('print("asd")', '<string>', 'exec')
+	exec code in ns
 
 if __name__ == '__main__': sys.exit(main())

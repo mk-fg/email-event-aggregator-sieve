@@ -23,42 +23,62 @@ aggregation:
 
 groups:
 
-  cron_jobs_without_timestamps: # arbitrary group name
+  cron_jobs_without_timestamps: # arbitrary processing group name
 
     # This group would be applied to message if
     #  any of the group tags will be specified on the command line
     tags:
       - cron-jobs
+      - from-myhost
 
-    name:
-      # Name for this event in the digest (if used)
-      # This further subdivides group into particular events, e.g. here each
-      #   cron job will only be aggregated with same-source and same-name jobs
-
-      fingerprint-groups: [source, name] # groups from any fingerprint match
-      # static: # one static name for all events in this group
-
-      # regexp: # same structure as for "fingerprint", all groups will be used
-      #   headers:
-      #     header-name:
-      #   body:
-      #   stdin:
-
-    fingerprint:
-      # All matched regexp (python "re") groups will produce a fingerprint
-      # Use e.g. '(?:stuff)' to use braces in regexp without creating a group
-
-      headers: # regexps to match against specific headers (if present)
-        subject: # header names are case-insensitive
-          # XXX: need better logic here - some embedded scheme maybe?
-          - '^Cron\s+<(?P<source>[^>]+)>\s+(?P<name>.*)$'
-
-      body: # list of regexps to match against message body
-        # XXX: need better logic here - some embedded scheme maybe?
-        - '^Cron\s+<[^>]+>\s+(.*)$'
-
-      # stdin: # list of regexps to match against whole stdin (headers + body)
+    max-length: 5_000_000 # mails with attachments aren't interesting anyway
 
     # aggregation: # same keys as in global section
+
+    #
+    # "parser" is a py function that should accept a following data structure:
+    #
+    #   group: cron_jobs_without_timestamps
+    #   tags:
+    #     group: [group-tag-1, ...]
+    #     cli: [cli-tag-1, ...]
+    #   headers:
+    #     - name: header-name-1
+    #       value: decoded-header-1
+    #     ...
+    #   body:
+    #     - mime: mime-type-1
+    #       data: decoded-body-part-1
+    #     ...
+    #
+    # (input data might have additional keys in the future)
+    # ...and return a dict like this:
+    #
+    #   aggregate_name: 'root@myhost my-noisy-script'
+    #   fingerprint: 857b9c903af724a42d7f
+    #
+    # Where "aggregate-name" will be only printed in a digest
+    #  to show how many mails with this fingerprint were rate-limited.
+    # None can also be returned for "does-not-match" kind of mails.
+    #
+    # Script will be run in a clean-ish namespace, and should define
+    #  "parser" function in it, which will then be used as outlined above.
+    # Idea here is to have powerful and flexible logic without any extra DSLs.
+    #
+    parser: |
+      import re
+      def parser(data):
+        agg_name = fingerprint = None
+        for header in headers:
+          if header['name'].lower() != 'subject': continue
+          m = re.search( r'^Cron\s+'
+            r'<(?P<src>[^>]+)>\s+(?P<name>.*)$', header['value'] )
+          if not m: continue
+          agg_name = '{} {}'.format(m.group('src'), m.group('name'))
+        if not agg_name: return
+        for part in body:
+          if not part['mime'].startswith('text/'): continue
+          '...calculate-some-fingerprint...'
+        return dict(aggregate_name=agg_name, fingerprint=fingerprint)
 
   # my-whatever-other-event-group: ...
