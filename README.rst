@@ -99,6 +99,4 @@ Requirements
 
 * `Python 2.7 <http://python.org/>`__ (not 3.X)
 
-* `PyYAML <http://pyyaml.org/>`__
-
 * MDA (Mail Delivery Agent) with filtering that allows piping mail to scripts.

@@ -3,15 +3,30 @@
 from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
-from os.path import basename, exists, expanduser
-from collections import namedtuple, OrderedDict
+from os.path import basename, exists, expanduser, join
+from collections import namedtuple, OrderedDict, deque
 import email, email.header, email.errors
-import os, sys, re, types, struct, string, runpy, time
+import os, sys, re, types, struct, string, time, base64
 
 conf_default_paths = '~/{}.conf.py'.format(
 	basename(__file__).split('.', 1)[0] ), '~/.eeas.conf.py'
 db_default_path = '~/.eeas.db'
 default_verdicts = {False: 'filter', True: 'pass'}
+
+os.umask(0077)
+
+
+def force_bytes(bytes_or_unicode, encoding='utf-8', errors='backslashreplace'):
+	if isinstance(bytes_or_unicode, bytes): return bytes_or_unicode
+	return bytes_or_unicode.encode(encoding, errors)
+
+def force_unicode(bytes_or_unicode, encoding='utf-8', errors='replace'):
+	if isinstance(bytes_or_unicode, unicode): return bytes_or_unicode
+	return bytes_or_unicode.decode(encoding, errors)
+
+def to_bytes(obj, **conv_kws):
+	if not isinstance(obj, types.StringTypes): obj = bytes(obj)
+	return force_bytes(obj)
 
 
 # Different from vanilla bencode in:
@@ -180,9 +195,6 @@ class EEASMailHandler(object):
 		self.last_verdict = verdict or self.default_verdicts[False]
 
 
-def mail_header_core(val):
-	return val.split(';', 1)[0].strip()
-
 def _mail_header_decode_part(line):
 	# Doesn't pick up some badly-concatenated stuff
 	return ' '.join( val.decode(enc or 'utf-8', 'replace')
@@ -248,7 +260,7 @@ class MailMsgHeaders(OrderedDict):
 		return _proc(hs)
 
 	def get_core(self, k, default=None):
-		return self.get(k, default, lambda hs: mail_header_core(hs[0]))
+		return self.get(k, default, lambda hs: hs[0].split(';', 1)[0].strip())
 
 	def get_all(self, k, default=None):
 		return self.get(k, default, lambda x: x)
@@ -272,6 +284,10 @@ def main(args=None):
 		help='Vertdict to print (any string) for emails'
 			' over --max-bytes in length (default: %(default)r).')
 
+	parser.add_argument('-e', '--error-reports-dir', metavar='path',
+		help='Path to store mails and error reports for processing these to.'
+			' Should probably have fairly restricted access permissions, for obvious reasons.')
+
 	parser.add_argument('-c', '--conf',
 		action='append', metavar='path',
 		help='Path(s) to configuration file (python code).'
@@ -281,8 +297,24 @@ def main(args=None):
 
 	global log
 	import logging
-	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
+	log_fmt = logging.Formatter(
+		'%(asctime)s :: %(levelname)s :: %(message)s', '%Y-%m-%d %H:%M:%S' )
+	log_handler = logging.StreamHandler(sys.stderr)
+	log_handler.setLevel(logging.DEBUG if opts.debug else logging.WARNING)
+	log_handler.setFormatter(log_fmt)
+	logging.root.addHandler(log_handler)
+	logging.root.setLevel(0)
 	log = logging.getLogger()
+
+	report_handler = None
+	if opts.error_reports_dir:
+		from logging.handlers import BufferingHandler
+		report_handler = BufferingHandler(capacity=1e4)
+		report_handler.setFormatter(log_fmt)
+		report_handler.buffer = deque(maxlen=report_handler.capacity)
+		report_handler.capacity += 1
+		report_handler.setLevel(0)
+		logging.root.addHandler(report_handler)
 
 	conf_paths = map(expanduser, opts.conf or conf_default_paths)
 	for p in conf_paths:
@@ -290,6 +322,7 @@ def main(args=None):
 	else:
 		parser.error( 'Failed to find configuration file'
 			' (tried paths: {})'.format(', '.join(map(repr, conf_paths))) )
+	log.debug('Using configuration path: %r', p)
 	ns0 = dict(
 		it=it, op=op, ft=ft, re=re, types=types, string=string,
 		db_path=expanduser(db_default_path),
@@ -300,13 +333,29 @@ def main(args=None):
 	ns = type('Namespace', (object,), dict())()
 	ns.__dict__.update(ns0)
 
-	mail_data = sys.stdin.read(ns.mail_max_bytes + 1)
-	if len(mail_data) > ns.mail_max_bytes: verdict = ns.mail_max_bytes_verdict
+	msg_str = sys.stdin.read(ns.mail_max_bytes + 1)
+	if len(msg_str) > ns.mail_max_bytes: verdict = ns.mail_max_bytes_verdict
 	else:
-		msg = mail_parse(mail_data)
-		eeas = EEASMailHandler(ns.db_path)
-		ns.parser(eeas, opts.tag, msg)
-		verdict = eeas.last_verdict
+		log.debug('Processing message (%sB)', len(msg_str))
+		try:
+			msg = mail_parse(msg_str)
+			eeas = EEASMailHandler(ns.db_path)
+			ns.parser(eeas, opts.tag, msg)
+			verdict = eeas.last_verdict
+		except Exception as err:
+			log.exception('Failed to parse/classify email message: %s', err)
+			if not opts.error_reports_dir: return 1
+			fn_base = join( opts.error_reports_dir,
+				'{}_[{}]'.format(time.strftime('%Y%m%d_%H%M%S'), base64.urlsafe_b64encode(os.urandom(3))) )
+			if not exists(opts.error_reports_dir): os.makedirs(opts.error_reports_dir)
+			with open('{}.mail'.format(fn_base), 'wb') as dst: dst.write(force_bytes(msg_str))
+			with open('{}.log'.format(fn_base), 'wb') as dst:
+				if report_handler:
+					for line in report_handler.buffer:
+						line = report_handler.format(line)
+						dst.write('{}\n'.format(force_bytes(line)))
+			return 1
+		log.debug('Processing verdict: %s', verdict)
 
 	sys.stdout.write(verdict)
 
