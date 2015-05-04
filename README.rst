@@ -85,7 +85,7 @@ Configuration example (`Dovecot MDA`_):
   ) { fileinto :flags "\\Seen" "reports.cron.noise"; stop; }
   fileinto "reports.cron"; stop;
 
-``~/.eeas.yaml`` - see ``eeas.example.yaml``
+``~/.eeas.conf.py`` - see ``eeas.conf.example.py``
 
 See also `Dovecot/Pigeonhole Sieve wiki`_ and `vnd.dovecot.execute plugin spec`_.
 

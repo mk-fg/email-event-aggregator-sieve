@@ -3,10 +3,26 @@
 from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
-import os, sys
+from os.path import basename, exists, expanduser
+import os, sys, re, types, string, runpy
 
-conf_default_paths = '~/{}.yaml'.format(
-	os.path.basename(__file__).split('.', 1)[0] ), '~/.eeas.yaml'
+conf_default_paths = '~/{}.conf.py'.format(
+	basename(__file__).split('.', 1)[0] ), '~/.eeas.conf.py'
+
+
+class EEASMailHandler(object):
+
+	def signature_from(self, **sig):
+		# XXX: bencode fingerprint
+		for k in 'aggregate_name', 'fingerprint':
+			assert isinstance(kws.get(k), types.StringTypes), [k, kws.get(k)]
+		return sig
+
+	def rate_limit_filter(self, sig, min, burst, interval, verdict='rate-limit'):
+		raise NotImplementedError
+
+	def mail_pass(self, sig, verdict='pass'): raise NotImplementedError
+	def mail_filter(self, sig, verdict='filter'): raise NotImplementedError
 
 
 def main(args=None):
@@ -19,8 +35,9 @@ def main(args=None):
 		help='Tag of a mail processing group to use.'
 			' With no tags specified, all groups will be matched.')
 
-	parser.add_argument('-c', '--conf', metavar='path',
-		help='Path to configuration file.'
+	parser.add_argument('-c', '--conf',
+		action='append', metavar='path',
+		help='Path(s) to configuration file (python code).'
 			' Default is to use first existing one of these: {}'.format(', '.join(conf_default_paths)))
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -30,8 +47,14 @@ def main(args=None):
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
 	log = logging.getLogger()
 
-	ns = dict()
-	code = compile('print("asd")', '<string>', 'exec')
-	exec code in ns
+	conf_paths = map(expanduser, opts.conf or conf_default_paths)
+	for p in conf_paths:
+		if exists(p): break
+	else:
+		parser.error( 'Failed to find configuration file'
+			' (tried paths: {})'.format(', '.join(map(repr, conf_paths))) )
+	mod = runpy.run_path(p, init_globals=dict(
+		it=it, op=op, ft=ft, re=re, types=types, string=string, eeas=EEASMailHandler() ))
+	parser_func = mod['parser']
 
 if __name__ == '__main__': sys.exit(main())
