@@ -4,25 +4,254 @@ from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
 from os.path import basename, exists, expanduser
-import os, sys, re, types, string, runpy
+from collections import namedtuple, OrderedDict
+import email, email.header, email.errors
+import os, sys, re, types, struct, string, runpy, time
 
 conf_default_paths = '~/{}.conf.py'.format(
 	basename(__file__).split('.', 1)[0] ), '~/.eeas.conf.py'
+db_default_path = '~/.eeas.db'
+default_verdicts = {False: 'filter', True: 'pass'}
 
+
+# Different from vanilla bencode in:
+#  * Handling "leading zeroes" in keys (doesn't error - for cjdns compat)
+#  * encode_none method (to "n")
+#  * encode_string encodes unicode as utf-8 bytes
+
+def _ns_class(cls_name, cls_parents, cls_attrs):
+	for k, v in cls_attrs.viewitems():
+		if isinstance(v, types.FunctionType):
+			cls_attrs[k] = classmethod(v)
+	return type(cls_name, cls_parents, cls_attrs)
+
+class BTEError(Exception): pass
+
+class Bencached(object):
+	__slots__ = 'bencoded',
+	def __init__(self, s): self.bencoded = s
+
+class BTE(object):
+	__metaclass__ = _ns_class
+
+	unicode_enc = 'utf-8'
+	enable_none = True
+	enable_bool = True
+	cjdns_compat = False
+
+	def decode_int(cls, x, f):
+		f += 1
+		newf = x.index('e', f)
+		n = int(x[f:newf])
+		if x[f] == '-':
+			if x[f + 1] == '0': raise ValueError
+		elif x[f] == '0' and newf != f+1: raise ValueError
+		return n, newf+1
+	def decode_string(cls, x, f):
+		colon = x.index(':', f)
+		n = int(x[f:colon])
+		if not cls.cjdns_compat\
+			and x[f] == '0' and colon != f+1: raise ValueError
+		colon += 1
+		return (x[colon:colon+n], colon+n)
+	def decode_list(cls, x, f):
+		r, f = [], f+1
+		while x[f] != 'e':
+			v, f = cls.decode_func[x[f]](cls, x, f)
+			r.append(v)
+		return r, f + 1
+	def decode_dict(cls, x, f):
+		r, f = {}, f+1
+		while x[f] != 'e':
+			k, f = cls.decode_string(x, f)
+			r[k], f = cls.decode_func[x[f]](cls, x, f)
+		return r, f + 1
+	def decode_none(cls, x, f):
+		if not cls.enable_none: raise ValueError(x[f])
+		return None, f+1
+	decode_func = dict(l=decode_list, d=decode_dict, i=decode_int, n=decode_none)
+	for n in xrange(10): decode_func[bytes(n)] = decode_string
+
+	def encode_bencached(cls, x, r): r.append(x.bencoded)
+	def encode_int(cls, x, r): r.extend(('i', str(x), 'e'))
+	def encode_float(cls, x, r): r.extend(('f', struct.pack('!d', x), 'e'))
+	def encode_bool(cls, x, r):
+		if not cls.enable_bool: raise ValueError(x)
+		if x: cls.encode_int(1, r)
+		else: cls.encode_int(0, r)
+	def encode_string(cls, x, r):
+		if isinstance(x, unicode):
+			if not cls.unicode_enc: raise ValueError(x)
+			x = x.encode(cls.unicode_enc)
+		r.extend((str(len(x)), ':', x))
+	def encode_list(cls, x, r):
+		r.append('l')
+		for i in x: cls.encode_func[type(i)](cls, i, r)
+		r.append('e')
+	def encode_dict(cls, x, r):
+		r.append('d')
+		ilist = x.items()
+		ilist.sort()
+		for k, v in ilist:
+			r.extend((str(len(k)), ':', k))
+			cls.encode_func[type(v)](cls, v, r)
+		r.append('e')
+	def encode_none(cls, x, r):
+		if not cls.enable_none: raise ValueError(x)
+		r.append('n')
+	encode_func = {
+		Bencached: encode_bencached,
+		unicode: encode_string,
+		str: encode_string,
+		types.IntType: encode_int,
+		types.LongType: encode_int,
+		types.FloatType: encode_float,
+		types.ListType: encode_list,
+		types.TupleType: encode_list,
+		types.DictType: encode_dict,
+		types.BooleanType: encode_bool,
+		types.NoneType: encode_none,
+	}
+
+	def bdecode(cls, x):
+		try: r, l = cls.decode_func[x[0]](cls, x, 0)
+		except (IndexError, KeyError, ValueError) as err:
+			raise BTEError('Not a valid bencoded string: {}'.format(err))
+		if l != len(x):
+			raise BTEError('Invalid bencoded value (data after valid prefix)')
+		return r
+
+	def bencode(cls, x):
+		r = []
+		cls.encode_func[type(x)](cls, x, r)
+		return ''.join(r)
+
+
+class EEASMailSig(namedtuple('EEASMailSig', 'aggregate_name fingerprint')):
+
+	def __new__(cls, aggregate_name, fingerprint=None, **kws):
+		return super(EEASMailSig, cls).__new__(cls, aggregate_name, BTE.bencode(fingerprint))
 
 class EEASMailHandler(object):
 
-	def signature_from(self, **sig):
-		# XXX: bencode fingerprint
-		for k in 'aggregate_name', 'fingerprint':
-			assert isinstance(kws.get(k), types.StringTypes), [k, kws.get(k)]
-		return sig
+	default_verdicts = default_verdicts
 
-	def rate_limit_filter(self, sig, min, burst, interval, verdict='rate-limit'):
+	def __init__(self, db_path, verdict_default=True):
+		self.last_verdict = self.default_verdicts.get(verdict_default, verdict_default)
+		self._rate_limit_iter_cache, self._db_path = dict(), db_path
+
+
+	def rate_limit_iter(self, sig, burst, interval):
+		k = sig, burst, interval
+		if k not in self.rate_limit_iter_cache:
+			self._rate_limit_iter_cache[k] =\
+				self._rate_limit_iter(sig, burst=burst, interval=interval)
+			next(self._rate_limit_iter_cache[k])
+		return self._rate_limit_iter_cache[k]
+
+	def rate_limit_data_for_sig(self, sig, update=None):
 		raise NotImplementedError
+		try: sqlite(self._db_path) # XXX
+		except LookupError: tokens, ts_sync = burst, time.time()
+		update()
 
-	def mail_pass(self, sig, verdict='pass'): raise NotImplementedError
-	def mail_filter(self, sig, verdict='filter'): raise NotImplementedError
+	def _rate_limit_iter(self, sig, burst, interval):
+		rate, (tokens, ts_sync) = interval**-1, self.rate_limit_data_for_sig(sig)
+		val = yield
+		while True:
+			ts = time()
+			ts_sync, tokens = ts, min(burst, tokens + (ts - ts_sync) * rate)
+			val, tokens = (None, tokens - val)\
+				if tokens >= val else ((val - tokens) / rate, tokens - val)
+			tokens, ts_sync = self.rate_limit_data_for_sig(sig, update=(tokens, ts_sync))
+			val = yield val
+
+
+	def signature_from(self, **sig_kws): return EEASMailSig(**sig_kws)
+
+	def rate_limit_filter(self, sig, min, burst, interval, verdicts=None, grab=1):
+		verdicts = verdicts or self.default_verdicts
+		verdict = self.rate_limit_iter(sig, min, burst, interval).send(grab) is None
+		self.last_verdict = verdicts[verdict]
+
+	def mail_pass(self, sig, verdict=None):
+		self.last_verdict = verdict or self.default_verdicts[True]
+	def mail_filter(self, sig, verdict=None):
+		self.last_verdict = verdict or self.default_verdicts[False]
+
+
+def mail_header_core(val):
+	return val.split(';', 1)[0].strip()
+
+def _mail_header_decode_part(line):
+	# Doesn't pick up some badly-concatenated stuff
+	return ' '.join( val.decode(enc or 'utf-8', 'replace')
+		for val, enc in email.header.decode_header(line) )
+
+def mail_header_decode(val):
+	res, header = list(), _mail_header_decode_part(val)
+	while True:
+		match = re.search('=\?[\w\d-]+(\*[\w\d-]+)?\?[QB]\?[^?]+\?=', header)
+		if not match:
+			res.append(header)
+			break
+		start, end = match.span(0)
+		match = header[start:end]
+		try: match = _mail_header_decode_part(match)
+		except email.errors.HeaderParseError: pass
+		res.extend([header[:start], match])
+		header = header[end:]
+	return ''.join(res)
+
+def _mail_parse(msg):
+	headers = MailMsgHeaders((k.lower(), mail_header_decode(v)) for k,v in msg.items())
+	payload = msg.get_payload(decode=True)\
+		if not msg.is_multipart() else map(_mail_parse, msg.get_payload())
+	if not headers.get('content-type'): headers['content-type'] = [msg.get_content_type()]
+	if headers.get_core('content-disposition') == 'attachment': payload = u'<attachment scrubbed>'
+	elif isinstance(payload, bytes): payload = payload.decode('utf-8', 'xmlreplace')
+	return MailMsg(headers, payload)
+
+def mail_parse(msg_str):
+	msg = email.message_from_string(msg_str)
+	return _mail_parse(msg)
+
+
+class MailMsg(namedtuple('MailMsg', 'headers payload')):
+
+	@property
+	def all_parts(self):
+		return [self] if isinstance(self.payload, unicode)\
+			else sorted(it.chain.from_iterable(m.all_parts for m in self.payload), key=len)
+
+	def _text_ct_prio(self, part):
+		ct = part.headers.get('content-type')
+		if ct == 'text/plain': return 1
+		if ct.startswith('text/'): return 2
+		return 3
+
+	@property
+	def text(self):
+		return sorted(self.all_parts, key=self._text_ct_prio)[0].payload
+
+class MailMsgHeaders(OrderedDict):
+
+	def __init__(self, headers_list):
+		super(MailMsgHeaders, self).__init__()
+		for k, v in headers_list:
+			if k not in self: self[k] = list()
+			self[k].append(v)
+
+	def get(self, k, default=None, _proc=op.itemgetter(0)):
+		hs = super(MailMsgHeaders, self).get(k)
+		if not hs: return default
+		return _proc(hs)
+
+	def get_core(self, k, default=None):
+		return self.get(k, default, lambda hs: mail_header_core(hs[0]))
+
+	def get_all(self, k, default=None):
+		return self.get(k, default, lambda x: x)
 
 
 def main(args=None):
@@ -34,6 +263,14 @@ def main(args=None):
 	parser.add_argument('tag', nargs='*',
 		help='Tag of a mail processing group to use.'
 			' With no tags specified, all groups will be matched.')
+
+	parser.add_argument('-s', '--max-bytes',
+		type=int, metavar='bytes', default=2*2**20,
+		help='Max size of emails to process. See also --max-bytes-verdict.')
+	parser.add_argument('--max-bytes-verdict',
+		metavar='word', default=default_verdicts[True],
+		help='Vertdict to print (any string) for emails'
+			' over --max-bytes in length (default: %(default)r).')
 
 	parser.add_argument('-c', '--conf',
 		action='append', metavar='path',
@@ -53,8 +290,24 @@ def main(args=None):
 	else:
 		parser.error( 'Failed to find configuration file'
 			' (tried paths: {})'.format(', '.join(map(repr, conf_paths))) )
-	mod = runpy.run_path(p, init_globals=dict(
-		it=it, op=op, ft=ft, re=re, types=types, string=string, eeas=EEASMailHandler() ))
-	parser_func = mod['parser']
+	ns0 = dict(
+		it=it, op=op, ft=ft, re=re, types=types, string=string,
+		db_path=expanduser(db_default_path),
+		mail_max_bytes=opts.max_bytes,
+		mail_max_bytes_verdict=opts.max_bytes_verdict )
+	with open(p, 'rb') as src: code = compile(src.read(), '<string>', 'exec')
+	exec code in ns0
+	ns = type('Namespace', (object,), dict())()
+	ns.__dict__.update(ns0)
+
+	mail_data = sys.stdin.read(ns.mail_max_bytes + 1)
+	if len(mail_data) > ns.mail_max_bytes: verdict = ns.mail_max_bytes_verdict
+	else:
+		msg = mail_parse(mail_data)
+		eeas = EEASMailHandler(ns.db_path)
+		ns.parser(eeas, opts.tag, msg)
+		verdict = eeas.last_verdict
+
+	sys.stdout.write(verdict)
 
 if __name__ == '__main__': sys.exit(main())
