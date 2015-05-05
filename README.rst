@@ -94,7 +94,7 @@ Run that a few more times (depending on configuration script), and eventually
 limits should kick in, showing different outcome (as per sieve rules).
 
 To get the digest table (rst format) with stats on passed/filtered mails (if
-any) for the last day, run::
+any) for the last day, following command can be used::
 
   % eeas digest --table --if-filtered 1d
   ====================== ========== ========== ==========
@@ -131,5 +131,5 @@ Notes
   Probably not a good idea to give that kind of access untrusted users, even if
   uid is something like "nobody" or "dovenull".
 
-* I though it'd be more extensive thing initially, but nah, with embedded python
-  for flexible "config", just one longish script seem to be enough.
+* I thought it'd be more extensive thing initially, but nah - with embedded
+  python for flexible "config", it's just one long-ish script.

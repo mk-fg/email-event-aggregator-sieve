@@ -464,9 +464,10 @@ def main(args=None):
 	cmd = cmds.add_parser('digest',
 		description='Output counters of rate-limited messages for a specified period of time.')
 
-	cmd.add_argument('span', nargs='?', default=Defs.history_timeout,
+	cmd.add_argument('span', nargs='?', default=bytes(Defs.history_timeout),
 		help='Timespan (from now)  either as a number'
-			' of seconds or in short form with units (e.g. "30s", "10min", "1h 20m", "1mo2w1d", etc).')
+			' of seconds or in short form with units (e.g. "30s", "10min", "1h 20m", "1mo2w1d", etc).'
+			' Default: %(default)ss (history_timeout value).')
 
 	cmd.add_argument('-p', '--if-passed', action='store_true',
 		help='Dont output results where none of the mails were passed.')
