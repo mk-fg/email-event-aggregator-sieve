@@ -18,20 +18,24 @@
 
 def parser(eeas, tags, msg):
 	agg_name = fingerprint = None
-	agg_type = None
+	msg_type = None
 
 	subject = msg.headers.get('subject')
 	if subject:
-		m = re.search(r'^Cron\s+<(?P<src>[^>]+)>\s+(?P<name>.*)$', subject)
-		if m:
-			agg_type = 'cron'
-			agg_name = '[{}] {}: {}'.format(m.group('src'), agg_type, m.group('name'))
+		if 'cron-jobs' in tags: # tags can be passed as a cli args from sieve script
+			m = re.search(r'^Cron\s+<(?P<src>[^>]+)>\s+(?P<name>.*)$', subject)
+			if m:
+				msg_type = 'cron'
+				agg_name = '[{}] {}: {}'.format(m.group('src'), msg_type, m.group('name'))
 
 	if not agg_name:
 		eeas.log.debug('Did not match agg_name from mail subject: %r', subject)
 		return
 
-	if agg_type == 'cron':
+
+	if msg_type == 'cron':
+		# fingerprint will be bencoded then hashed, so any simple py
+		# Following data types will work: strings, numbers, lists, tuples, dicts, bools, None
 		fingerprint = list()
 		for line in msg.text.splitlines():
 			# Strip iso8601-ish timestamps from output lines, if any
@@ -39,11 +43,12 @@ def parser(eeas, tags, msg):
 			if m: line = m.group(1)
 			fingerprint.append(line)
 
-	if not fingerprint:
+	else:
 		# Can raise error here to have mail dropped into --error-reports-dir for later check
 		eeas.log.debug( 'Failed to calculate fingerprint'
-			' for mail body (agg_name: %s, agg_type: %s)', agg_name, agg_type )
+			' for mail body (agg_name: %s, msg_type: %s)', agg_name, msg_type )
 		return
+
 
 	# Currently required "signature" keys are: aggregate_name, fingerprint
 	# "aggregate_name" will be only printed in a digest
@@ -61,4 +66,4 @@ def parser(eeas, tags, msg):
 	# interval: interval between new tokens, in seconds
 	eeas.rate_limit_filter(data_sig, tmin=1, burst=3, interval=3*24*3600)
 
-	# Only last verdict from eeas.* functions will be used
+	# Only last verdict from eeas.* functions will be used for message
