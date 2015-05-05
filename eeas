@@ -474,6 +474,9 @@ def main(args=None):
 	cmd.add_argument('-f', '--if-filtered', action='store_true',
 		help='Dont output results where none of the mails were filtered.')
 	cmd.add_argument('-t', '--table', action='store_true', help='Output results as an rst table.')
+	cmd.add_argument('-e', '--use-exit-code', action='store_true',
+		help='Exit with non-zero status code if there was any output.'
+			' Default is to always exit with success status.')
 
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -554,6 +557,8 @@ def main(args=None):
 				'{{0[agg_name]:>{0}s}} :: passed={{0[passed]:✗}} filtered={{0[filtered]:✗}}'\
 				.replace('✗', '>0{1}d').format(agg_name_len, num_len)
 			for line in digest: print(line_fmt.format(line))
+
+		if opts.use_exit_code: return 1
 
 	elif opts.cmd == 'check':
 		msg_str = sys.stdin.read(ns.mail_max_bytes + 1)
