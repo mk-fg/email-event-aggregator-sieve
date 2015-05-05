@@ -7,12 +7,15 @@ from os.path import basename, exists, expanduser, join
 from collections import namedtuple, OrderedDict, deque
 from contextlib import contextmanager, closing
 import email, email.header, email.errors
-import os, sys, re, types, struct, string, time, base64, hashlib, sqlite3
+import os, sys, re, types, struct, string, time, base64, hashlib, random, sqlite3
 
-conf_default_paths = '~/{}.conf.py'.format(
-	basename(__file__).split('.', 1)[0] ), '~/.eeas.conf.py'
-db_default_path = '~/.eeas.db'
-default_verdicts = {False: 'filter', True: 'pass'}
+class Defs(object):
+	conf_paths = '~/{}.conf.py'.format(
+		basename(__file__).split('.', 1)[0] ), '~/.eeas.conf.py'
+	db_path = '~/.eeas.db'
+	default_verdicts = {False: 'filter', True: 'pass'}
+	history_timeout = 7 * 24 * 3600 # 1 week
+	history_cleanup_chance = 0.05
 
 os.umask(0077)
 
@@ -152,7 +155,8 @@ class EEASSigDB(object):
 			tokens REAL NOT NULL,
 			ts_sync REAL NOT NULL
 		);
-		CREATE UNIQUE INDEX IF NOT EXISTS agg_idx ON rate_limit_state (fingerprint, agg_name);
+		CREATE UNIQUE INDEX IF NOT EXISTS
+			agg_idx ON rate_limit_state (agg_name, fingerprint);
 
 		CREATE TABLE IF NOT EXISTS meta (
 			var TEXT PRIMARY KEY ON CONFLICT REPLACE NOT NULL,
@@ -160,13 +164,23 @@ class EEASSigDB(object):
 		);
 	'''
 
-	_db_migrations = []
+	_db_migrations = [
+		# Assuming sqlite might be lacking foreign keys (e.g. disabled during build)
+		'''CREATE TABLE IF NOT EXISTS rate_limit_hits (
+				fingerprint BLOB NOT NULL,
+				agg_name TEXT NOT NULL,
+				ts REAL NOT NULL );
+			CREATE INDEX IF NOT EXISTS
+				agg_idx_ts ON rate_limit_hits (agg_name, fingerprint, ts);''',
+		'''CREATE INDEX IF NOT EXISTS ts_cleanup ON rate_limit_state (ts_sync);
+				CREATE INDEX IF NOT EXISTS ts_cleanup_hits ON rate_limit_hits (ts);''' ]
 
 	_db = None
 
-	def __init__(self, path, log=None, commit_after=None):
-		self._log, self._db = log, sqlite3.connect(path, timeout=60)
+	def __init__(self, conf, log=None, commit_after=None):
+		self._log, self._db = log, sqlite3.connect(conf.db_path, timeout=60)
 		self._db.row_factory = sqlite3.Row
+		self.conf = conf
 
 		# commit_after should be a tuple of (queries, seconds)
 		seq, ts = (None, None) if not commit_after else\
@@ -210,6 +224,13 @@ class EEASSigDB(object):
 				" VALUES ('schema_version', '{}')".format(schema_ver) )
 
 
+	def cleanup(self, ts=None):
+		if random.random() > self.conf.history_cleanup_chance: return
+		if not ts: ts = time.time()
+		ts_cutoff = ts - self.conf.history_timeout
+		self._query('DELETE FROM rate_limit_hits WHERE ts < ?', (ts_cutoff,))
+		self._query('DELETE FROM rate_limit_state WHERE ts_sync < ?', (ts_cutoff,))
+
 	def tb_state_get(self, sig):
 		with self._cursor(
 				'SELECT tokens, ts_sync  FROM rate_limit_state'
@@ -224,9 +245,16 @@ class EEASSigDB(object):
 			'INSERT OR REPLACE INTO rate_limit_state'
 				' (agg_name, fingerprint, tokens, ts_sync) VALUES (?, ?, ?, ?)',
 			(sig.aggregate_name, sig.fingerprint, tokens, ts_sync) )
+		self.cleanup()
 		return tokens, ts_sync
 
-
+	def digest_add_hit(self, sig, ts=None):
+		if not ts: ts = time.time()
+		self._query(
+			'INSERT INTO rate_limit_hits'
+				' (agg_name, fingerprint, ts) VALUES (?, ?, ?)',
+			(sig.aggregate_name, sig.fingerprint, ts) )
+		self.cleanup()
 
 
 class EEASMailSig(namedtuple('EEASMailSig', 'aggregate_name fingerprint')):
@@ -237,12 +265,11 @@ class EEASMailSig(namedtuple('EEASMailSig', 'aggregate_name fingerprint')):
 
 class EEASMailHandler(object):
 
-	default_verdicts = default_verdicts
-
-	def __init__(self, db_path, verdict_default=True):
-		self.log = log # so that it can easily be used in conf-script
-		self.last_verdict = self.default_verdicts.get(verdict_default, verdict_default)
-		self._rate_limit_iter_cache, self._db = dict(), EEASSigDB(db_path, log=log)
+	def __init__(self, conf, verdict_default=True):
+		self.conf, self.log = conf, log # so that it can easily be used in conf-script
+		self.last_verdict = conf.default_verdicts.get(verdict_default, verdict_default)
+		self._rate_limit_iter_cache = dict()
+		self._db = EEASSigDB(conf, log=log)
 
 
 	def rate_limit_iter(self, sig, tmin, burst, interval):
@@ -270,14 +297,15 @@ class EEASMailHandler(object):
 	def signature_from(self, **sig_kws): return EEASMailSig(**sig_kws)
 
 	def rate_limit_filter(self, sig, tmin, burst, interval, verdicts=None, grab=1):
-		verdicts = verdicts or self.default_verdicts
+		verdicts = verdicts or self.conf.default_verdicts
 		verdict = self.rate_limit_iter(sig, tmin, burst, interval).send(grab) is None
+		if not verdict: self._db.digest_add_hit(sig)
 		self.last_verdict = verdicts[verdict]
 
 	def mail_pass(self, sig, verdict=None):
-		self.last_verdict = verdict or self.default_verdicts[True]
+		self.last_verdict = verdict or self.conf.default_verdicts[True]
 	def mail_filter(self, sig, verdict=None):
-		self.last_verdict = verdict or self.default_verdicts[False]
+		self.last_verdict = verdict or self.conf.default_verdicts[False]
 
 
 def _mail_header_decode_part(line):
@@ -364,7 +392,7 @@ def main(args=None):
 		type=int, metavar='bytes', default=2*2**20,
 		help='Max size of emails to process. See also --max-bytes-verdict.')
 	parser.add_argument('--max-bytes-verdict',
-		metavar='word', default=default_verdicts[True],
+		metavar='word', default=Defs.default_verdicts[True],
 		help='Vertdict to print (any string) for emails'
 			' over --max-bytes in length (default: %(default)r).')
 
@@ -375,7 +403,7 @@ def main(args=None):
 	parser.add_argument('-c', '--conf',
 		action='append', metavar='path',
 		help='Path(s) to configuration file (python code).'
-			' Default is to use first existing one of these: {}'.format(', '.join(conf_default_paths)))
+			' Default is to use first existing one of these: {}'.format(', '.join(Defs.conf_paths)))
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -400,7 +428,7 @@ def main(args=None):
 		report_handler.setLevel(0)
 		logging.root.addHandler(report_handler)
 
-	conf_paths = map(expanduser, opts.conf or conf_default_paths)
+	conf_paths = map(expanduser, opts.conf or Defs.conf_paths)
 	for p in conf_paths:
 		if exists(p): break
 	else:
@@ -409,7 +437,10 @@ def main(args=None):
 	log.debug('Using configuration path: %r', p)
 	ns0 = dict(
 		it=it, op=op, ft=ft, re=re, types=types, string=string,
-		db_path=expanduser(db_default_path),
+		db_path=expanduser(Defs.db_path),
+		default_verdicts=Defs.default_verdicts,
+		history_timeout=Defs.history_timeout,
+		history_cleanup_chance=Defs.history_cleanup_chance,
 		mail_max_bytes=opts.max_bytes,
 		mail_max_bytes_verdict=opts.max_bytes_verdict )
 	with open(p, 'rb') as src: code = compile(src.read(), '<string>', 'exec')
@@ -423,7 +454,7 @@ def main(args=None):
 		log.debug('Processing message (%sB)', len(msg_str))
 		try:
 			msg = mail_parse(msg_str)
-			eeas = EEASMailHandler(ns.db_path)
+			eeas = EEASMailHandler(ns)
 			ns.parser(eeas, opts.tag, msg)
 			verdict = eeas.last_verdict
 		except Exception as err:

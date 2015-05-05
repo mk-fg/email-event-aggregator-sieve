@@ -46,13 +46,6 @@ This "digest" thing is not implemented yet.
 .. _Dovecot/Pigeonhole "sieve" mail filters: http://wiki2.dovecot.org/Pigeonhole/Sieve/
 
 
-General note on email event notifications
------------------------------------------
-
-Email might not be the best place for these, but it works, very robust and
-easiest to setup in most cases.
-
-
 Usage
 -----
 
@@ -107,7 +100,8 @@ and `"extprograms" plugin page`_ for more info on dovecot configuration.
 
 .. _Dovecot MDA: http://dovecot.org/
 .. _Dovecot/Pigeonhole Sieve wiki: http://wiki2.dovecot.org/Pigeonhole/Sieve/
-.. _vnd.dovecot.execute plugin spec: http://hg.rename-it.nl/pigeonhole-0.3-sieve-extprograms/raw-file/tip/doc/rfc/spec-bosch-sieve-extprograms.txt
+.. _vnd.dovecot.execute plugin spec:
+   http://hg.rename-it.nl/pigeonhole-0.3-sieve-extprograms/raw-file/tip/doc/rfc/spec-bosch-sieve-extprograms.txt
 .. _"extprograms" plugin page: http://wiki2.dovecot.org/Pigeonhole/Sieve/Plugins/Extprograms
 
 
@@ -117,3 +111,17 @@ Requirements
 * `Python 2.7 <http://python.org/>`__ (not 3.X)
 
 * MDA (Mail Delivery Agent) with filtering that allows piping mail to scripts.
+
+
+Notes
+-----
+
+* Email might not be the best place for event notifications, but it works, very
+  robust and easiest to setup in most cases.
+
+* This script obviously allows to run anything from its uid.
+  Probably not a good idea to give that kind of access untrusted users, even if
+  uid is something like "nobody" or "dovenull".
+
+* I though it'd be more extensive thing initially, but nah, with embedded python
+  for flexible "config", just one longish script seem to be enough.

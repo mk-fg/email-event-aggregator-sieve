@@ -16,6 +16,11 @@
 # mail_max_bytes =
 # mail_max_bytes_verdict =
 
+## Other stuff
+# history_timeout =
+# history_cleanup_chance =
+# default_verdicts =
+
 def parser(eeas, tags, msg):
 	agg_name = fingerprint = None
 	msg_type = None
