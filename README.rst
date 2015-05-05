@@ -41,8 +41,6 @@ Info about rate-limited mails should be stored in the database, so running
 "digest" command (from the same script) every once in a while (e.g. daily) will
 produce an email digest with the list of rate-limited stuff, if there was any.
 
-This "digest" thing is not implemented yet.
-
 .. _Dovecot/Pigeonhole "sieve" mail filters: http://wiki2.dovecot.org/Pigeonhole/Sieve/
 
 
@@ -77,7 +75,7 @@ Note that ``sieve_execute_socket_dir`` will run command with specified (in the
 ``~/.dovecot.sieve``::
 
   if allof(
-    execute :pipe :output "eeas_check" "eeas" "cron-jobs",
+    execute :pipe :output "eeas_check" "eeas" "check" "--" "cron-jobs",
     not string :is "${eeas_check}" "pass"
   ) { fileinto :flags "\\Seen" "reports.cron.noise"; stop; }
   fileinto "reports.cron"; stop;
@@ -94,6 +92,16 @@ the rate-limit counters.
 
 Run that a few more times (depending on configuration script), and eventually
 limits should kick in, showing different outcome (as per sieve rules).
+
+To get the digest table (rst format) with stats on passed/filtered mails (if
+any) for the last day, run::
+
+  % eeas digest --table --if-filtered 1d
+  ====================== ========== ========== ==========
+   name                    passed    filtered    total
+  ---------------------- ---------- ---------- ----------
+   [root@host] cron cmd          2          8         10
+  ====================== ========== ========== ==========
 
 See also `Dovecot/Pigeonhole Sieve wiki`_, `vnd.dovecot.execute plugin spec`_
 and `"extprograms" plugin page`_ for more info on dovecot configuration.

@@ -32,6 +32,36 @@ def to_bytes(obj, **conv_kws):
 	if not isinstance(obj, types.StringTypes): obj = bytes(obj)
 	return force_bytes(obj)
 
+def parse_timedelta(ts_str):
+	from datetime import datetime, timedelta
+	assert isinstance(ts_str, bytes), [type(ts_str), repr(ts_str)]
+	ts_str = ts_str.replace('_', ' ')
+
+	if ts_str.isdigit(): delta = timedelta(seconds=int(ts_str))
+	else:
+		_short_ts_days = dict(y=365.25, yr=365.25, mo=30.5, w=7, d=1)
+		_short_ts_s = dict(h=3600, hr=3600, m=60, min=60, s=1, sec=1)
+		def _short_ts_regexp():
+			ts_re = ['^']
+			for k in it.chain(_short_ts_days, _short_ts_s):
+				ts_re.append(r'(?P<{0}>\d+{0}\s*)?'.format(k))
+			return re.compile(''.join(ts_re), re.I | re.U)
+		match = _short_ts_regexp().search(ts_str)
+		if not match or not any(match.groups()): raise ValueError(ts_str)
+		delta = list()
+		parse_int = lambda v: int(''.join(c for c in v if c.isdigit()))
+		for units in [_short_ts_days, _short_ts_s]:
+			val = 0
+			for k, v in units.iteritems():
+				try:
+					if not match.group(k): continue
+					n = parse_int(match.group(k))
+				except IndexError: continue
+				val += n * v
+			delta.append(val)
+		delta = timedelta(*delta)
+	return ((datetime.now() - delta) - datetime(1970, 1, 1)).total_seconds()
+
 
 # Different from vanilla bencode in:
 #  * Handling "leading zeroes" in keys (doesn't error - for cjdns compat)
@@ -173,7 +203,8 @@ class EEASSigDB(object):
 			CREATE INDEX IF NOT EXISTS
 				agg_idx_ts ON rate_limit_hits (agg_name, fingerprint, ts);''',
 		'''CREATE INDEX IF NOT EXISTS ts_cleanup ON rate_limit_state (ts_sync);
-				CREATE INDEX IF NOT EXISTS ts_cleanup_hits ON rate_limit_hits (ts);''' ]
+				CREATE INDEX IF NOT EXISTS ts_cleanup_hits ON rate_limit_hits (ts);''',
+		'ALTER TABLE rate_limit_hits ADD COLUMN pass INT NOT NULL DEFAULT 0;' ]
 
 	_db = None
 
@@ -220,8 +251,8 @@ class EEASSigDB(object):
 		if len(self._db_migrations) > schema_ver:
 			for schema_ver, query in enumerate(
 				self._db_migrations[schema_ver:], schema_ver+1 ): db.executescript(query)
-			self._query( 'INSERT INTO meta (var, val)'
-				" VALUES ('schema_version', '{}')".format(schema_ver) )
+			self._query( '''INSERT INTO meta (var, val)
+				 VALUES ('schema_version', '{}')'''.format(schema_ver) )
 
 
 	def cleanup(self, ts=None):
@@ -233,8 +264,8 @@ class EEASSigDB(object):
 
 	def tb_state_get(self, sig):
 		with self._cursor(
-				'SELECT tokens, ts_sync  FROM rate_limit_state'
-					' WHERE agg_name = ? AND fingerprint = ?',
+				'''SELECT tokens, ts_sync  FROM rate_limit_state
+					WHERE agg_name = ? AND fingerprint = ?''',
 				(sig.aggregate_name, sig.fingerprint) ) as c:
 			row = c.fetchone()
 			if not row: raise LookupError
@@ -248,12 +279,26 @@ class EEASSigDB(object):
 		self.cleanup()
 		return tokens, ts_sync
 
-	def digest_add_hit(self, sig, ts=None):
+	def digest_get(self, span, count_filter=None, ts=None):
+		if not ts: ts = time.time()
+		ts_cutoff = ts - span
+		having = '' if not count_filter else 'HAVING {} > 0'.format(count_filter)
+		with self._cursor(
+				'''SELECT
+						fingerprint, agg_name,
+						COUNT(CASE WHEN pass = 1 THEN 1 ELSE NULL END) AS passed,
+						COUNT(CASE WHEN pass = 0 THEN 1 ELSE NULL END) AS filtered
+					FROM rate_limit_hits'
+					' WHERE ts > ? GROUP BY fingerprint || agg_name {}'''.format(having),
+				(ts_cutoff,) ) as c:
+			return c.fetchall()
+
+	def digest_add_hit(self, sig, verdict, ts=None):
 		if not ts: ts = time.time()
 		self._query(
 			'INSERT INTO rate_limit_hits'
-				' (agg_name, fingerprint, ts) VALUES (?, ?, ?)',
-			(sig.aggregate_name, sig.fingerprint, ts) )
+				' (agg_name, fingerprint, pass, ts) VALUES (?, ?, ?, ?)',
+			(sig.aggregate_name, sig.fingerprint, verdict, ts) )
 		self.cleanup()
 
 
@@ -299,7 +344,7 @@ class EEASMailHandler(object):
 	def rate_limit_filter(self, sig, tmin, burst, interval, verdicts=None, grab=1):
 		verdicts = verdicts or self.conf.default_verdicts
 		verdict = self.rate_limit_iter(sig, tmin, burst, interval).send(grab) is None
-		if not verdict: self._db.digest_add_hit(sig)
+		self._db.digest_add_hit(sig, verdict)
 		self.last_verdict = verdicts[verdict]
 
 	def mail_pass(self, sig, verdict=None):
@@ -384,27 +429,52 @@ def main(args=None):
 		description='Email filtering hook to aggregate'
 			' and keep track of repeated event notification emails.')
 
-	parser.add_argument('tag', nargs='*',
-		help='Tag of a mail processing group to use.'
-			' With no tags specified, all groups will be matched.')
-
-	parser.add_argument('-s', '--max-bytes',
-		type=int, metavar='bytes', default=2*2**20,
-		help='Max size of emails to process. See also --max-bytes-verdict.')
-	parser.add_argument('--max-bytes-verdict',
-		metavar='word', default=Defs.default_verdicts[True],
-		help='Vertdict to print (any string) for emails'
-			' over --max-bytes in length (default: %(default)r).')
-
-	parser.add_argument('-e', '--error-reports-dir', metavar='path',
-		help='Path to store mails and error reports for processing these to.'
-			' Should probably have fairly restricted access permissions, for obvious reasons.')
-
 	parser.add_argument('-c', '--conf',
 		action='append', metavar='path',
 		help='Path(s) to configuration file (python code).'
 			' Default is to use first existing one of these: {}'.format(', '.join(Defs.conf_paths)))
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
+
+	cmds = parser.add_subparsers(
+		dest='cmd', title='Actions',
+		description='Supported actions (have their own suboptions as well)')
+
+
+	cmd = cmds.add_parser('check',
+		description='Check email vs defined rules and output verdict.',
+		epilog='Full message should be piped to stdin, verdict gets printed to stdout.')
+
+	cmd.add_argument('tag', nargs='*',
+		help='Tag of a mail processing group to use.'
+			' With no tags specified, all groups will be matched.')
+
+	cmd.add_argument('-s', '--max-bytes',
+		type=int, metavar='bytes', default=2*2**20,
+		help='Max size of emails to process. See also --max-bytes-verdict.')
+	cmd.add_argument('--max-bytes-verdict',
+		metavar='word', default=Defs.default_verdicts[True],
+		help='Vertdict to print (any string) for emails'
+			' over --max-bytes in length (default: %(default)r).')
+
+	cmd.add_argument('-e', '--error-reports-dir', metavar='path',
+		help='Path to store mails and error reports for processing these to.'
+			' Should probably have fairly restricted access permissions, for obvious reasons.')
+
+
+	cmd = cmds.add_parser('digest',
+		description='Output counters of rate-limited messages for a specified period of time.')
+
+	cmd.add_argument('span', nargs='?', default=Defs.history_timeout,
+		help='Timespan (from now)  either as a number'
+			' of seconds or in short form with units (e.g. "30s", "10min", "1h 20m", "1mo2w1d", etc).')
+
+	cmd.add_argument('-p', '--if-passed', action='store_true',
+		help='Dont output results where none of the mails were passed.')
+	cmd.add_argument('-f', '--if-filtered', action='store_true',
+		help='Dont output results where none of the mails were filtered.')
+	cmd.add_argument('-t', '--table', action='store_true', help='Output results as an rst table.')
+
+
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
 	global log
@@ -419,7 +489,7 @@ def main(args=None):
 	log = logging.getLogger()
 
 	report_handler = None
-	if opts.error_reports_dir:
+	if getattr(opts, 'error_reports_dir', None):
 		from logging.handlers import BufferingHandler
 		report_handler = BufferingHandler(capacity=1e4)
 		report_handler.setFormatter(log_fmt)
@@ -441,37 +511,73 @@ def main(args=None):
 		default_verdicts=Defs.default_verdicts,
 		history_timeout=Defs.history_timeout,
 		history_cleanup_chance=Defs.history_cleanup_chance,
-		mail_max_bytes=opts.max_bytes,
-		mail_max_bytes_verdict=opts.max_bytes_verdict )
+		mail_max_bytes=getattr(opts, 'max_bytes', None),
+		mail_max_bytes_verdict=getattr(opts, 'max_bytes_verdict', None) )
 	with open(p, 'rb') as src: code = compile(src.read(), '<string>', 'exec')
 	exec code in ns0
 	ns = type('Namespace', (object,), dict())()
 	ns.__dict__.update(ns0)
 
-	msg_str = sys.stdin.read(ns.mail_max_bytes + 1)
-	if len(msg_str) > ns.mail_max_bytes: verdict = ns.mail_max_bytes_verdict
-	else:
-		log.debug('Processing message (%sB)', len(msg_str))
-		try:
-			msg = mail_parse(msg_str)
-			eeas = EEASMailHandler(ns)
-			ns.parser(eeas, opts.tag, msg)
-			verdict = eeas.last_verdict
-		except Exception as err:
-			log.exception('Failed to parse/classify email message: %s', err)
-			if not opts.error_reports_dir: return 1
-			fn_base = join( opts.error_reports_dir,
-				'{}_[{}]'.format(time.strftime('%Y%m%d_%H%M%S'), base64.urlsafe_b64encode(os.urandom(3))) )
-			if not exists(opts.error_reports_dir): os.makedirs(opts.error_reports_dir)
-			with open('{}.mail'.format(fn_base), 'wb') as dst: dst.write(force_bytes(msg_str))
-			with open('{}.log'.format(fn_base), 'wb') as dst:
-				if report_handler:
-					for line in report_handler.buffer:
-						line = report_handler.format(line)
-						dst.write('{}\n'.format(force_bytes(line)))
-			return 1
-		log.debug('Processing verdict: %s', verdict)
+	if opts.cmd == 'digest':
+		if not opts.if_passed ^ opts.if_filtered: count_filter = None
+		elif opts.if_passed: count_filter = 'passed'
+		elif opts.if_filtered: count_filter = 'filtered'
 
-	sys.stdout.write(verdict)
+		span = parse_timedelta(opts.span)
+		db = EEASSigDB(ns, log=log)
+		digest = db.digest_get(span, count_filter)
+		if not digest: return
+
+		agg_name_len = max(len(line['agg_name']) for line in digest)
+		num_len = len(bytes(max(
+			map(op.itemgetter('passed'), digest)
+			+ map(op.itemgetter('filtered'), digest) )))
+
+		if opts.table:
+			table_head = dict(agg_name='name', passed='passed', filtered='filtered', total='total')
+			table_head_len = max(map(len, table_head.values()))
+			agg_name_len, num_len = max(agg_name_len, table_head_len), max(num_len, table_head_len)
+			table_hr = lambda s: print('{0} {1} {1} {1}'.format(s*(agg_name_len + 2), s*(num_len + 2)))
+			line_fmt = lambda head=False:\
+				' {{0[agg_name]:<{0}s}}   {{0[passed]:✗}}   {{0[filtered]:✗}}   {{1:✗}}'\
+				.replace('✗', '>{1}d' if not head else '^{1}s').format(agg_name_len, num_len)
+			table_hr('=')
+			print(line_fmt(True).format(table_head, table_head['total']))
+			table_hr('-')
+			for line in digest:
+				print(line_fmt().format(line, line['passed'] + line['filtered']))
+			table_hr('=')
+
+		else:
+			line_fmt =\
+				'{{0[agg_name]:>{0}s}} :: passed={{0[passed]:✗}} filtered={{0[filtered]:✗}}'\
+				.replace('✗', '>0{1}d').format(agg_name_len, num_len)
+			for line in digest: print(line_fmt.format(line))
+
+	elif opts.cmd == 'check':
+		msg_str = sys.stdin.read(ns.mail_max_bytes + 1)
+		if len(msg_str) > ns.mail_max_bytes: verdict = ns.mail_max_bytes_verdict
+		else:
+			log.debug('Processing message (%sB)', len(msg_str))
+			try:
+				msg = mail_parse(msg_str)
+				eeas = EEASMailHandler(ns)
+				ns.parser(eeas, opts.tag, msg)
+				verdict = eeas.last_verdict
+			except Exception as err:
+				log.exception('Failed to parse/classify email message: %s', err)
+				if not opts.error_reports_dir: return 1
+				fn_base = join(opts.error_reports_dir, '{}_[{}]'.format(
+					time.strftime('%Y%m%d_%H%M%S'), base64.urlsafe_b64encode(os.urandom(3)) ))
+				if not exists(opts.error_reports_dir): os.makedirs(opts.error_reports_dir)
+				with open('{}.mail'.format(fn_base), 'wb') as dst: dst.write(force_bytes(msg_str))
+				with open('{}.log'.format(fn_base), 'wb') as dst:
+					if report_handler:
+						for line in report_handler.buffer:
+							line = report_handler.format(line)
+							dst.write('{}\n'.format(force_bytes(line)))
+				return 1
+			log.debug('Processing verdict: %s', verdict)
+		sys.stdout.write(verdict)
 
 if __name__ == '__main__': sys.exit(main())
