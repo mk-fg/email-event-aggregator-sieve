@@ -87,11 +87,24 @@ Configuration example (`Dovecot MDA`_):
 
 ``~/.eeas.conf.py`` - see ``eeas.conf.example.py``
 
-See also `Dovecot/Pigeonhole Sieve wiki`_ and `vnd.dovecot.execute plugin spec`_.
+To test whether script/rules work, save one of the rate-limited mails (entire
+thing, with headers) and run e.g.::
+
+  % sieve-test -D -t- -Tdebug .dovecot.sieve message.eml
+
+This should hit all the rules (showing which ones) and run the script, bumping
+the rate-limit counters.
+
+Run that a few more times (depending on configuration script), and eventually
+limits should kick in, showing different outcome (as per sieve rules).
+
+See also `Dovecot/Pigeonhole Sieve wiki`_, `vnd.dovecot.execute plugin spec`_
+and `"extprograms" plugin info`_ for more info on dovecot configuration.
 
 .. _Dovecot MDA: http://dovecot.org/
 .. _Dovecot/Pigeonhole Sieve wiki: http://wiki2.dovecot.org/Pigeonhole/Sieve/
 .. _vnd.dovecot.execute plugin spec: http://hg.rename-it.nl/pigeonhole-0.3-sieve-extprograms/raw-file/tip/doc/rfc/spec-bosch-sieve-extprograms.txt
+.. _"extprograms" plugin info: http://wiki2.dovecot.org/Pigeonhole/Sieve/Plugins/Extprograms
 
 
 Requirements
