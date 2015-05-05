@@ -9,14 +9,15 @@ Example might be cron job notifications - same thing failing over and over,
 which you either don't have time or real need to address right now.
 
 Idea though is not to "sweep these under the rug", but to make them not clutter
-the mailbox (drowning out all other stuff in there) and draw disproportionate
-amount of attention, compared to other - maybe much more rare, but also much
-more critical stuff there.
+the mailbox (drowning out all other stuff) and draw disproportionate amount of
+attention, compared to other - maybe much more rare, but also much more critical
+stuff there.
 
-This script enables usage scenario (for some subset of) a mailbox, where each
+This script enables usage scenario for (some subset of) a mailbox, where each
 unread email is treated as an "open issue", and subsequent repeated
-notifications about the same issue don't need to be prominent, but useful to get
-as an occasional reminder (e.g. aggregated in one digest) while issue persists.
+notifications about the same issue (with same content) don't need to be
+prominent, but useful to get as an occasional reminder (e.g. aggregated into one
+daily/weekly digest) while issue persists.
 
 
 Operation
@@ -24,21 +25,23 @@ Operation
 
 This script is supposed to be hooked into e.g. `Dovecot/Pigeonhole "sieve" mail
 filters`_, and process each message, calculating its distinct "fingerprint",
-based on simple regexp rules of your choosing (e.g. same subject + same body
-circa timestamps).
+based on simple rules of your choosing (e.g. same subject + same body circa
+timestamps) in a python "configuration" script (see "eeas.conf.example.py").
 
 Repeated messages with the same fingerprint will then be rate-limited by a
-token-bucket algorithm, returning negative filtering result to sieve rules.
+token-bucket algorithm, returning negative (or just different - any string can
+be returned) filtering result to sieve rules.
 
-That doesn't mean that they should be dropped though - just dump them in some
-"noise" dir of the mailbox (as opposed to e.g. "reports.cron") with "Seen" flag
-set, so that whatever IMAP client/interface (MUA) won't be drawing attention to
-these, and there won't be any "New Mail" notifications all the time.
+That doesn't mean that any mails should be dropped though - just dump them in
+some "noise" dir of the mailbox (as opposed to e.g. "reports.cron") with "Seen"
+flag set, so that whatever IMAP client/interface (MUA) won't be drawing
+attention to these, and there won't be a "New Mail" notifications all the time.
 
-All the info about these mails gets stored in the database though, so running
-"digest" command (from the same script) every once in a while (e.g. once a day)
-will produce an email digest with the list of rate-limited stuff, if there was
-any.
+Info about rate-limited mails should be stored in the database, so running
+"digest" command (from the same script) every once in a while (e.g. daily) will
+produce an email digest with the list of rate-limited stuff, if there was any.
+
+This "digest" thing is not implemented yet.
 
 .. _Dovecot/Pigeonhole "sieve" mail filters: http://wiki2.dovecot.org/Pigeonhole/Sieve/
 
@@ -74,6 +77,9 @@ Configuration example (`Dovecot MDA`_):
     }
   }
 
+Note that ``sieve_execute_socket_dir`` will run command with specified (in the
+``service`` block) uid/gid, not necessarily the ones of the maildir owner.
+``sieve_execute_bin_dir`` option can be used for that instead.
 
 ``~/.dovecot.sieve``::
 
@@ -97,12 +103,12 @@ Run that a few more times (depending on configuration script), and eventually
 limits should kick in, showing different outcome (as per sieve rules).
 
 See also `Dovecot/Pigeonhole Sieve wiki`_, `vnd.dovecot.execute plugin spec`_
-and `"extprograms" plugin info`_ for more info on dovecot configuration.
+and `"extprograms" plugin page`_ for more info on dovecot configuration.
 
 .. _Dovecot MDA: http://dovecot.org/
 .. _Dovecot/Pigeonhole Sieve wiki: http://wiki2.dovecot.org/Pigeonhole/Sieve/
 .. _vnd.dovecot.execute plugin spec: http://hg.rename-it.nl/pigeonhole-0.3-sieve-extprograms/raw-file/tip/doc/rfc/spec-bosch-sieve-extprograms.txt
-.. _"extprograms" plugin info: http://wiki2.dovecot.org/Pigeonhole/Sieve/Plugins/Extprograms
+.. _"extprograms" plugin page: http://wiki2.dovecot.org/Pigeonhole/Sieve/Plugins/Extprograms
 
 
 Requirements
