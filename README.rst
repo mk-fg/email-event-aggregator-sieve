@@ -18,8 +18,6 @@ unread email is treated as an "open issue", and subsequent repeated
 notifications about the same issue don't need to be prominent, but useful to get
 as an occasional reminder (e.g. aggregated in one digest) while issue persists.
 
-**Under heavy development, not there yet**
-
 
 Operation
 ---------
