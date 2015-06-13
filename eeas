@@ -60,7 +60,7 @@ def parse_timedelta(ts_str):
 				val += n * v
 			delta.append(val)
 		delta = timedelta(*delta)
-	return ((datetime.now() - delta) - datetime(1970, 1, 1)).total_seconds()
+	return delta.total_seconds()
 
 
 # Different from vanilla bencode in:
