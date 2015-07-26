@@ -255,12 +255,18 @@ class EEASSigDB(object):
 				 VALUES ('schema_version', '{}')'''.format(schema_ver) )
 
 
-	def cleanup(self, ts=None):
-		if random.random() > self.conf.history_cleanup_chance: return
-		if not ts: ts = time.time()
-		ts_cutoff = ts - self.conf.history_timeout
-		self._query('DELETE FROM rate_limit_hits WHERE ts < ?', (ts_cutoff,))
-		self._query('DELETE FROM rate_limit_state WHERE ts_sync < ?', (ts_cutoff,))
+	def cleanup(self, ts=None, ts_cutoff=None, force=False, dry_run=False):
+		if not force and random.random() > self.conf.history_cleanup_chance: return
+		if ts_cutoff is None:
+			if ts is None: ts = time.time()
+			ts_cutoff = ts - self.conf.history_timeout
+		act = 'DELETE' if not dry_run else 'SELECT COUNT(1)'
+		count_hits = count_states = None
+		with self._cursor('{} FROM rate_limit_hits WHERE ts < ?'.format(act), (ts_cutoff,)) as c:
+			count_hits = c.fetchone()[0] if dry_run else c.rowcount
+		with self._cursor('{} FROM rate_limit_state WHERE ts_sync < ?'.format(act), (ts_cutoff,)) as c:
+			count_states = c.fetchone()[0] if dry_run else c.rowcount
+		return dict(hits=count_hits, states=count_states)
 
 	def tb_state_get(self, sig):
 		with self._cursor(
@@ -332,9 +338,13 @@ class EEASMailHandler(object):
 		val = yield
 		while True:
 			ts = time.time()
+			self.log.debug('Rate-limit-TB ts_sync: %s', ts_sync)
 			ts_sync, tokens = ts, min(burst, tokens + (ts - ts_sync) * rate)
+			self.log.debug('Rate-limit-TB tokens: %s', tokens)
 			tokens = max(0, tokens - val)
 			val = None if tokens >= tmin else ((tmin + val - tokens) / rate)
+			self.log.debug( 'Rate-limit-TB tokens-after'
+				' vs tmin: %s vs %s (filter: %s)', tokens, tmin, bool(val) )
 			tokens, ts_sync = self._db.tb_state_set(sig, tokens, ts_sync)
 			val = yield val
 
@@ -440,8 +450,8 @@ def main(args=None):
 		description='Supported actions (have their own suboptions as well)')
 
 
-	cmd = cmds.add_parser('check',
-		description='Check email vs defined rules and output verdict.',
+	cmd = 'Check email vs defined rules and output verdict.'
+	cmd = cmds.add_parser('check', help=cmd, description=cmd,
 		epilog='Full message should be piped to stdin, verdict gets printed to stdout.')
 
 	cmd.add_argument('tag', nargs='*',
@@ -461,8 +471,8 @@ def main(args=None):
 			' Should probably have fairly restricted access permissions, for obvious reasons.')
 
 
-	cmd = cmds.add_parser('digest',
-		description='Output counters of rate-limited messages for a specified period of time.')
+	cmd = 'Output counters of rate-limited messages for a specified period of time.'
+	cmd = cmds.add_parser('digest', help=cmd, description=cmd)
 
 	cmd.add_argument('span', nargs='?', default=bytes(Defs.history_timeout),
 		help='Timespan (from now)  either as a number'
@@ -478,6 +488,20 @@ def main(args=None):
 		help='Exit with non-zero status code if there was any output.'
 			' Default is to always exit with success status.')
 
+
+	cmd = 'Cleanup older entries from db.'
+	cmd = cmds.add_parser('purge', help=cmd, description=cmd,
+		epilog='Should not be necessary (done on checks),'
+				' unless history_cleanup_chance have been set to zero.'
+			' Default action is dry-run (see --run option).')
+
+	cmd.add_argument('span', nargs='?', default=bytes(Defs.history_timeout),
+		help='Timespan (from now)  either as a number'
+			' of seconds or in short form with units (e.g. "30s", "10min", "1h 20m", "1mo2w1d", etc).'
+			' Default: %(default)ss (history_timeout value).')
+
+	cmd.add_argument('-x', '--run', action='store_true',
+		help='Actually remove stuff, not just count it.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -585,5 +609,17 @@ def main(args=None):
 				return 1
 			log.debug('Processing verdict: %s', verdict)
 		sys.stdout.write(verdict)
+
+	elif opts.cmd == 'purge':
+		from datetime import datetime
+		ts_cutoff = time.time() - parse_timedelta(opts.span)
+		db = EEASSigDB(ns, log=log)
+		info = db.cleanup(ts_cutoff=ts_cutoff, force=True, dry_run=not opts.run)
+		info = 'Cutoff ts: {}, hits: {}, states: {}'\
+			.format(datetime.fromtimestamp(ts_cutoff), info['hits'], info['states'])
+		if not opts.run: print(info)
+		else: log.debug(info)
+
+	else: parser.error('Unrecognized command: {}'.format(opts.cmd))
 
 if __name__ == '__main__': sys.exit(main())
